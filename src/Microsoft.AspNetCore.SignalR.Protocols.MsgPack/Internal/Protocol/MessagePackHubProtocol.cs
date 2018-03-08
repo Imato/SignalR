@@ -325,7 +325,7 @@ namespace Microsoft.AspNetCore.SignalR.Internal.Protocol
             //packer.PackString(message.Target);
             MessagePackBinary.WriteString(packer, message.Target);
             //packer.PackObject(message.Arguments, SerializationContext);
-            MessagePackSerializer.Serialize(packer, message.Arguments);
+            MessagePackSerializer.Serialize(packer, message.Arguments, MessagePack.Resolvers.ContractlessStandardResolver.Instance);
         }
 
         private void WriteStreamInvocationMessage(StreamInvocationMessage message, Stream packer)
@@ -340,7 +340,7 @@ namespace Microsoft.AspNetCore.SignalR.Internal.Protocol
             //packer.PackString(message.Target);
             MessagePackBinary.WriteString(packer, message.Target);
             //packer.PackObject(message.Arguments, SerializationContext);
-            MessagePackSerializer.Serialize(packer, message.Arguments);
+            MessagePackSerializer.Serialize(packer, message.Arguments, MessagePack.Resolvers.ContractlessStandardResolver.Instance);
         }
 
         private void WriteStreamingItemMessage(StreamItemMessage message, Stream packer)
@@ -353,7 +353,7 @@ namespace Microsoft.AspNetCore.SignalR.Internal.Protocol
             //packer.PackString(message.InvocationId);
             MessagePackBinary.WriteString(packer, message.InvocationId);
             //packer.PackObject(message.Item, SerializationContext);
-            MessagePackSerializer.Serialize(packer, message.Item);
+            MessagePackSerializer.Serialize(packer, message.Item, MessagePack.Resolvers.ContractlessStandardResolver.Instance);
         }
 
         private void WriteCompletionMessage(CompletionMessage message, Stream packer)
@@ -380,7 +380,7 @@ namespace Microsoft.AspNetCore.SignalR.Internal.Protocol
                     break;
                 case NonVoidResult:
                     //packer.PackObject(message.Result, SerializationContext);
-                    MessagePackSerializer.Serialize(packer, message.Result);
+                    MessagePackSerializer.Serialize(packer, message.Result, MessagePack.Resolvers.ContractlessStandardResolver.Instance);
                     break;
             }
         }
@@ -558,7 +558,7 @@ namespace Microsoft.AspNetCore.SignalR.Internal.Protocol
             Exception msgPackException = null;
             try
             {
-                return MessagePackSerializer.Deserialize<object>(unpacker);
+                return MessagePackSerializer.Deserialize<object>(unpacker, MessagePack.Resolvers.ContractlessStandardResolver.Instance);
                 //if (unpacker.Read())
                 //{
                 //    var serializer = MessagePackSerializer.Get(type);
