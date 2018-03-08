@@ -14,12 +14,17 @@ namespace BenchmarksServer
     {
         public static void Main(string[] args)
         {
+            var config = new ConfigurationBuilder()
+                .AddCommandLine(args)
+                .AddEnvironmentVariables(prefix: "ASPNETCORE_")
+                .Build();
+
             var host = new WebHostBuilder()
                 .UseSetting(WebHostDefaults.PreventHostingStartupKey, "true")
                 .ConfigureLogging((context, factory) =>
                 {
-                    //factory.AddConfiguration(context.Configuration.GetSection("Logging"));
-                    //factory.AddConsole();
+                    factory.AddConfiguration(context.Configuration.GetSection("Logging"));
+                    factory.AddConsole();
                 })
                 .UseKestrel()
                 .UseContentRoot(Directory.GetCurrentDirectory())
