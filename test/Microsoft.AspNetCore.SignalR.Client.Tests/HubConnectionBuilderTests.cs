@@ -3,7 +3,6 @@
 
 using System;
 using Microsoft.AspNetCore.SignalR.Internal.Protocol;
-//using MsgPack.Serialization;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Serialization;
 using Xunit;
