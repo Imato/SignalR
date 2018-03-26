@@ -7,10 +7,11 @@ using System.Diagnostics;
 using System.IO;
 using System.Runtime.ExceptionServices;
 using System.Runtime.InteropServices;
+using MessagePack;
+using MessagePack.Formatters;
 using Microsoft.AspNetCore.Connections;
 using Microsoft.AspNetCore.SignalR.Internal.Formatters;
 using Microsoft.Extensions.Options;
-using MessagePack;
 
 namespace Microsoft.AspNetCore.SignalR.Internal.Protocol
 {
@@ -20,10 +21,10 @@ namespace Microsoft.AspNetCore.SignalR.Internal.Protocol
         private const int VoidResult = 2;
         private const int NonVoidResult = 3;
 
+        private readonly IFormatterResolver _resolver;
+
         public static readonly string ProtocolName = "messagepack";
         public static readonly int ProtocolVersion = 1;
-
-        private static bool _setup;
 
         public string Name => ProtocolName;
 
@@ -37,15 +38,24 @@ namespace Microsoft.AspNetCore.SignalR.Internal.Protocol
 
         public MessagePackHubProtocol(IOptions<MessagePackHubProtocolOptions> options)
         {
-            if (!_setup)
+            var msgPackOptions = options.Value;
+            if (msgPackOptions.FormatterResolvers.Count != SignalRResolver.Resolvers.Count)
             {
-                MessagePack.Resolvers.CompositeResolver.RegisterAndSetAsDefault(
-                    // Resolve DateTime first
-                    MessagePack.Resolvers.NativeDateTimeResolver.Instance,
-                    MessagePack.Resolvers.ContractlessStandardResolver.Instance
-                );
-                _setup = true;
+                _resolver = new CombinedResolvers(msgPackOptions.FormatterResolvers);
+                return;
             }
+
+            for (var i = 0; i < msgPackOptions.FormatterResolvers.Count; i++)
+            {
+                if (msgPackOptions.FormatterResolvers[i] != SignalRResolver.Resolvers[i])
+                {
+                    _resolver = new CombinedResolvers(msgPackOptions.FormatterResolvers);
+                    return;
+                }
+            }
+
+            // Use optimized cached resolver if the default is chosen
+            _resolver = SignalRResolver.Instance;
         }
 
         public bool IsVersionSupported(int version)
@@ -60,7 +70,7 @@ namespace Microsoft.AspNetCore.SignalR.Internal.Protocol
                 var isArray = MemoryMarshal.TryGetArray(payload, out var arraySegment);
                 // This will never be false unless we started using un-managed buffers
                 Debug.Assert(isArray);
-                var message = ParseMessage(arraySegment.Array, arraySegment.Offset, binder);
+                var message = ParseMessage(arraySegment.Array, arraySegment.Offset, binder, _resolver);
                 if (message != null)
                 {
                     messages.Add(message);
@@ -70,7 +80,7 @@ namespace Microsoft.AspNetCore.SignalR.Internal.Protocol
             return messages.Count > 0;
         }
 
-        private static HubMessage ParseMessage(byte[] input, int startOffset, IInvocationBinder binder)
+        private static HubMessage ParseMessage(byte[] input, int startOffset, IInvocationBinder binder, IFormatterResolver resolver)
         {
             _ = MessagePackBinary.ReadArrayHeader(input, startOffset, out var readSize);
             startOffset += readSize;
@@ -80,13 +90,13 @@ namespace Microsoft.AspNetCore.SignalR.Internal.Protocol
             switch (messageType)
             {
                 case HubProtocolConstants.InvocationMessageType:
-                    return CreateInvocationMessage(input, ref startOffset, binder);
+                    return CreateInvocationMessage(input, ref startOffset, binder, resolver);
                 case HubProtocolConstants.StreamInvocationMessageType:
-                    return CreateStreamInvocationMessage(input, ref startOffset, binder);
+                    return CreateStreamInvocationMessage(input, ref startOffset, binder, resolver);
                 case HubProtocolConstants.StreamItemMessageType:
-                    return CreateStreamItemMessage(input, ref startOffset, binder);
+                    return CreateStreamItemMessage(input, ref startOffset, binder, resolver);
                 case HubProtocolConstants.CompletionMessageType:
-                    return CreateCompletionMessage(input, ref startOffset, binder);
+                    return CreateCompletionMessage(input, ref startOffset, binder, resolver);
                 case HubProtocolConstants.CancelInvocationMessageType:
                     return CreateCancelInvocationMessage(input, ref startOffset);
                 case HubProtocolConstants.PingMessageType:
@@ -99,7 +109,7 @@ namespace Microsoft.AspNetCore.SignalR.Internal.Protocol
             }
         }
 
-        private static InvocationMessage CreateInvocationMessage(byte[] input, ref int offset, IInvocationBinder binder)
+        private static InvocationMessage CreateInvocationMessage(byte[] input, ref int offset, IInvocationBinder binder, IFormatterResolver resolver)
         {
             var headers = ReadHeaders(input, ref offset);
             var invocationId = ReadInvocationId(input, ref offset);
@@ -116,7 +126,7 @@ namespace Microsoft.AspNetCore.SignalR.Internal.Protocol
 
             try
             {
-                var arguments = BindArguments(input, ref offset, parameterTypes);
+                var arguments = BindArguments(input, ref offset, parameterTypes, resolver);
                 return ApplyHeaders(headers, new InvocationMessage(invocationId, target, argumentBindingException: null, arguments: arguments));
             }
             catch (Exception ex)
@@ -125,7 +135,7 @@ namespace Microsoft.AspNetCore.SignalR.Internal.Protocol
             }
         }
 
-        private static StreamInvocationMessage CreateStreamInvocationMessage(byte[] input, ref int offset, IInvocationBinder binder)
+        private static StreamInvocationMessage CreateStreamInvocationMessage(byte[] input, ref int offset, IInvocationBinder binder, IFormatterResolver resolver)
         {
             var headers = ReadHeaders(input, ref offset);
             var invocationId = ReadInvocationId(input, ref offset);
@@ -134,7 +144,7 @@ namespace Microsoft.AspNetCore.SignalR.Internal.Protocol
 
             try
             {
-                var arguments = BindArguments(input, ref offset, parameterTypes);
+                var arguments = BindArguments(input, ref offset, parameterTypes, resolver);
                 return ApplyHeaders(headers, new StreamInvocationMessage(invocationId, target, argumentBindingException: null, arguments: arguments));
             }
             catch (Exception ex)
@@ -143,16 +153,16 @@ namespace Microsoft.AspNetCore.SignalR.Internal.Protocol
             }
         }
 
-        private static StreamItemMessage CreateStreamItemMessage(byte[] input, ref int offset, IInvocationBinder binder)
+        private static StreamItemMessage CreateStreamItemMessage(byte[] input, ref int offset, IInvocationBinder binder, IFormatterResolver resolver)
         {
             var headers = ReadHeaders(input, ref offset);
             var invocationId = ReadInvocationId(input, ref offset);
             var itemType = binder.GetReturnType(invocationId);
-            var value = DeserializeObject(input, ref offset, itemType, "item");
+            var value = DeserializeObject(input, ref offset, itemType, "item", resolver);
             return ApplyHeaders(headers, new StreamItemMessage(invocationId, value));
         }
 
-        private static CompletionMessage CreateCompletionMessage(byte[] input, ref int offset, IInvocationBinder binder)
+        private static CompletionMessage CreateCompletionMessage(byte[] input, ref int offset, IInvocationBinder binder, IFormatterResolver resolver)
         {
             var headers = ReadHeaders(input, ref offset);
             var invocationId = ReadInvocationId(input, ref offset);
@@ -169,7 +179,7 @@ namespace Microsoft.AspNetCore.SignalR.Internal.Protocol
                     break;
                 case NonVoidResult:
                     var itemType = binder.GetReturnType(invocationId);
-                    result = DeserializeObject(input, ref offset, itemType, "argument");
+                    result = DeserializeObject(input, ref offset, itemType, "argument", resolver);
                     hasResult = true;
                     break;
                 case VoidResult:
@@ -217,7 +227,7 @@ namespace Microsoft.AspNetCore.SignalR.Internal.Protocol
             }
         }
 
-        private static object[] BindArguments(byte[] input, ref int offset, IReadOnlyList<Type> parameterTypes)
+        private static object[] BindArguments(byte[] input, ref int offset, IReadOnlyList<Type> parameterTypes, IFormatterResolver resolver)
         {
             var argumentCount = ReadArrayLength(input, ref offset, "arguments");
 
@@ -232,7 +242,7 @@ namespace Microsoft.AspNetCore.SignalR.Internal.Protocol
                 var arguments = new object[argumentCount];
                 for (var i = 0; i < argumentCount; i++)
                 {
-                    arguments[i] = DeserializeObject(input, ref offset, parameterTypes[i], "argument");
+                    arguments[i] = DeserializeObject(input, ref offset, parameterTypes[i], "argument", resolver);
                 }
 
                 return arguments;
@@ -318,7 +328,7 @@ namespace Microsoft.AspNetCore.SignalR.Internal.Protocol
                 MessagePackBinary.WriteString(packer, message.InvocationId);
             }
             MessagePackBinary.WriteString(packer, message.Target);
-            MessagePackSerializer.Serialize(packer, message.Arguments);
+            MessagePackSerializer.Serialize(packer, message.Arguments, _resolver);
         }
 
         private void WriteStreamInvocationMessage(StreamInvocationMessage message, Stream packer)
@@ -328,7 +338,7 @@ namespace Microsoft.AspNetCore.SignalR.Internal.Protocol
             PackHeaders(packer, message.Headers);
             MessagePackBinary.WriteString(packer, message.InvocationId);
             MessagePackBinary.WriteString(packer, message.Target);
-            MessagePackSerializer.Serialize(packer, message.Arguments);
+            MessagePackSerializer.Serialize(packer, message.Arguments, _resolver);
         }
 
         private void WriteStreamingItemMessage(StreamItemMessage message, Stream packer)
@@ -337,7 +347,7 @@ namespace Microsoft.AspNetCore.SignalR.Internal.Protocol
             MessagePackBinary.WriteInt16(packer, HubProtocolConstants.StreamItemMessageType);
             PackHeaders(packer, message.Headers);
             MessagePackBinary.WriteString(packer, message.InvocationId);
-            MessagePackSerializer.Serialize(packer, message.Item);
+            MessagePackSerializer.Serialize(packer, message.Item, _resolver);
         }
 
         private void WriteCompletionMessage(CompletionMessage message, Stream packer)
@@ -358,7 +368,7 @@ namespace Microsoft.AspNetCore.SignalR.Internal.Protocol
                     MessagePackBinary.WriteString(packer, message.Error);
                     break;
                 case NonVoidResult:
-                    MessagePackSerializer.Serialize(packer, message.Result);
+                    MessagePackSerializer.Serialize(packer, message.Result, _resolver);
                     break;
             }
         }
@@ -501,12 +511,12 @@ namespace Microsoft.AspNetCore.SignalR.Internal.Protocol
             throw new FormatException($"Reading array length for '{field}' failed.", msgPackException);
         }
 
-        private static object DeserializeObject(byte[] input, ref int offset, Type type, string field)
+        private static object DeserializeObject(byte[] input, ref int offset, Type type, string field, IFormatterResolver resolver)
         {
             Exception msgPackException = null;
             try
             {
-                var obj = MessagePackSerializer.NonGeneric.Deserialize(type, new ArraySegment<byte>(input, offset, input.Length - offset));
+                var obj = MessagePackSerializer.NonGeneric.Deserialize(type, new ArraySegment<byte>(input, offset, input.Length - offset), resolver);
                 offset += MessagePackBinary.ReadNextBlock(input, offset);
                 return obj;
             }
@@ -516,6 +526,69 @@ namespace Microsoft.AspNetCore.SignalR.Internal.Protocol
             }
 
             throw new FormatException($"Deserializing object of the `{type.Name}` type for '{field}' failed.", msgPackException);
+        }
+
+        internal static List<IFormatterResolver> CreateDefaultFormatterResolvers()
+        {
+            // Copy to allow users to add/remove resolvers without changing the static SignalRResolver list
+            return new List<IFormatterResolver>(SignalRResolver.Resolvers);
+        }
+
+        internal class SignalRResolver : IFormatterResolver
+        {
+            public static readonly IFormatterResolver Instance = new SignalRResolver();
+
+            public static readonly IList<IFormatterResolver> Resolvers = new[]
+            {
+                MessagePack.Resolvers.NativeDateTimeResolver.Instance,
+                MessagePack.Resolvers.ContractlessStandardResolver.Instance
+            };
+
+            public IMessagePackFormatter<T> GetFormatter<T>()
+            {
+                return Cache<T>.Formatter;
+            }
+
+            private static class Cache<T>
+            {
+                public static readonly IMessagePackFormatter<T> Formatter;
+
+                static Cache()
+                {
+                    foreach (var resolver in Resolvers)
+                    {
+                        Formatter = resolver.GetFormatter<T>();
+                        if (Formatter != null)
+                        {
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+
+        internal class CombinedResolvers : IFormatterResolver
+        {
+            private readonly IList<IFormatterResolver> _resolvers;
+
+            public CombinedResolvers(IList<IFormatterResolver> resolvers)
+            {
+                _resolvers = resolvers;
+            }
+
+            public IMessagePackFormatter<T> GetFormatter<T>()
+            {
+                foreach (var resolver in _resolvers)
+                {
+                    var formatter = resolver.GetFormatter<T>();
+                    if (formatter != null)
+                    {
+                        return formatter;
+                    }
+                }
+
+                return null;
+            }
         }
     }
 }
